@@ -1,43 +1,55 @@
-import { exec } from "child_process";
 import cors from "cors";
+import dotenv from "dotenv";
 import express from "express";
-import { promises as fs } from "fs";
-import fetch from "node-fetch";
+import { fileURLToPath } from "url";
+import path from "path";
+import { retrieveContext, getOrCreateTopicContent, listKnownTopics } from "./rag.js";
+import { callGroqChat, extractTopic } from "./groqClient.js";
+
+dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(express.json());
 app.use(cors());
 const port = process.env.PORT || 3000;
 
-// Real-time lip sync generator based on phonemes
 const generateLipSyncFromText = (text) => {
   const words = text.toLowerCase().split(/\s+/);
   const mouthCues = [];
   let currentTime = 0;
 
-  // Phoneme mapping for more accurate lip sync
   const phonemeMap = {
-    // Closed lips (B, M, P)
     'b': 'B', 'm': 'B', 'p': 'B',
-    // Wide open (A, O)
     'a': 'A', 'o': 'A', 'aw': 'A', 'au': 'A',
-    // Smile (E, I, Y)
     'e': 'E', 'i': 'E', 'y': 'E', 'ee': 'E',
-    // Round lips (U, W, OO)
     'u': 'U', 'w': 'U', 'oo': 'U',
-    // F, V sounds
-    'f': 'F', 'v': 'F',
-    // TH sounds
-    'th': 'D',
-    // Rest position
+    'f': 'F', 'v': 'F', 'ph': 'F',
+    'th': 'H',
     'default': 'X'
   };
 
-  words.forEach(word => {
-    const duration = Math.max(word.length * 0.08, 0.3); // Word duration
+  const digraphs = ['th', 'aw', 'au', 'ee', 'oo', 'ph'];
 
-    // Simple phoneme breakdown (you can make this more sophisticated)
-    const phonemes = word.split('').filter(char => /[a-z]/.test(char));
+  words.forEach(word => {
+    const duration = Math.max(word.length * 0.08, 0.3);
+
+    const phonemes = [];
+    let i = 0;
+    while (i < word.length) {
+      const pair = word.slice(i, i + 2);
+      if (digraphs.includes(pair)) {
+        phonemes.push(pair);
+        i += 2;
+      } else if (/[a-z]/.test(word[i])) {
+        phonemes.push(word[i]);
+        i += 1;
+      } else {
+        i += 1;
+      }
+    }
 
     if (phonemes.length > 0) {
       const segmentDuration = duration / phonemes.length;
@@ -52,7 +64,7 @@ const generateLipSyncFromText = (text) => {
       });
     }
 
-    currentTime += duration + 0.1; // Add pause between words
+    currentTime += duration + 0.1;
   });
 
   return {
@@ -61,38 +73,26 @@ const generateLipSyncFromText = (text) => {
   };
 };
 
-app.get("/", (req, res) => {
-  res.send("Hello World! Using Ollama API with Real-time Lip Sync");
-});
+const systemPrompt = "You are a friendly English tutor speaking simply to a beginner learner.\nAnswer each question in 2-3 short sentences, using clear everyday English and one simple example.\nReturn plain text only. Do not use markdown, asterisks, bold, bullets, headings, or list formatting.\nDo not repeat the same answer for different questions.\nIf the question is not about English learning, politely ask the user to ask about English grammar, vocabulary, pronunciation, or usage.";
 
-// Groq API call function
-const callOllama = async (prompt) => {
-  try {
-    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.7,
-        max_completion_tokens: 100, // Shorter responses for real-time
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error(`Groq API error: ${response.statusText}`);
-    }
-
-    const data = await response.json();
-    return data.choices[0].message.content;
-  } catch (error) {
-    console.error('Groq API call failed:', error);
-    throw error;
+const getFallbackResponse = (userMessage) => {
+  const lowerMessage = userMessage.toLowerCase();
+  if (lowerMessage.includes('hello') || lowerMessage.includes('hi')) {
+    return "Hello! I'm your English tutor. How can I help you learn English today?";
+  } else if (lowerMessage.includes('grammar')) {
+    return "I'd be happy to help with grammar! Could you give me a specific example?";
+  } else if (lowerMessage.includes('vocabulary')) {
+    return "Let's expand your vocabulary! What words interest you?";
+  } else if (lowerMessage.includes('pronunciation')) {
+    return "Pronunciation practice is important! What words would you like to practice?";
+  } else {
+    return "That's interesting! I can help with grammar, vocabulary, or pronunciation. What would you like to focus on?";
   }
 };
+
+app.get("/", (req, res) => {
+  res.send("English Tutor backend running with dynamic self-building RAG (Groq)");
+});
 
 app.post("/chat", async (req, res) => {
   const userMessage = req.body.message;
@@ -100,79 +100,67 @@ app.post("/chat", async (req, res) => {
   if (!userMessage) {
     const welcomeText = "Hello! I'm your English tutor. How can I help you learn English today?";
     return res.send({
-      messages: [
-        {
-          text: welcomeText,
-          facialExpression: "smile",
-          animation: "Talking_1",
-          lipsync: generateLipSyncFromText(welcomeText),
-          audio: "" // We'll use browser TTS
-        }
-      ],
+      messages: [{
+        text: welcomeText,
+        facialExpression: "smile",
+        animation: "Talking_1",
+        lipsync: generateLipSyncFromText(welcomeText),
+        audio: ""
+      }],
     });
   }
 
   try {
-    const prompt = `As an English tutor, give a detailed conversational response to only if the query is regarding english subject and also if the user closes by saying bye,close the conversation or else say u dont know: "${userMessage}" (max 50 words)`;
+    // Step 1: Dynamically detect the topic using Groq
+    const topic = await extractTopic(userMessage);
+    console.log("Detected topic:", topic);
 
-    const ollamaResponse = await callOllama(prompt);
+    // Step 2: RAG - retrieve or build context for this topic
+    let context = retrieveContext(topic);
+    const contentForContext = context ? context.content : await getOrCreateTopicContent(topic);
 
-    console.log("Ollama response:", ollamaResponse);
+    // Prompt updated to remove any mention of PDFs
+    const userPrompt = "Context notes:\n" + contentForContext + "\n\nQuestion: \"" + userMessage + "\"\n\nUsing the context notes above, answer the learner's question clearly with one simple example.";
 
-    const cleanResponse = ollamaResponse.replace(/```json\s*|\s*```|{[\s\S]*?}/g, '').trim();
-    const messageText = cleanResponse || getFallbackResponse(userMessage);
+    const answer = await callGroqChat([
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt }
+    ]);
 
-    // Generate real-time lip sync
-    const lipsync = generateLipSyncFromText(messageText);
+    const messageText = (answer && answer.length > 0) ? answer : getFallbackResponse(userMessage);
 
-    const messages = [{
-      text: messageText,
-      facialExpression: "smile",
-      animation: "Talking_1",
-      lipsync: lipsync,
-      audio: "" // Using browser TTS instead of files
-    }];
-
-    res.send({ messages });
+    res.send({
+      messages: [{
+        text: messageText,
+        facialExpression: "smile",
+        animation: "Talking_1",
+        lipsync: generateLipSyncFromText(messageText),
+        audio: ""
+      }]
+    });
 
   } catch (error) {
     console.error("API error:", error);
-
     const fallbackText = getFallbackResponse(userMessage);
-    const lipsync = generateLipSyncFromText(fallbackText);
-
     res.send({
       messages: [{
         text: fallbackText,
         facialExpression: "smile",
         animation: "Talking_1",
-        lipsync: lipsync
+        lipsync: generateLipSyncFromText(fallbackText)
       }]
     });
   }
 });
 
-// Fallback response generator
-const getFallbackResponse = (userMessage) => {
-  const lowerMessage = userMessage.toLowerCase();
+app.get("/topics", (req, res) => {
+  res.send({ topics: listKnownTopics() });
+});
 
-  if (lowerMessage.includes('hello') || lowerMessage.includes('hi')) {
-    return "Hello! I'm your English tutor. How can I help you learn English today?";
-  }
-  else if (lowerMessage.includes('grammar')) {
-    return "I'd be happy to help with grammar! Could you give me a specific example?";
-  }
-  else if (lowerMessage.includes('vocabulary')) {
-    return "Let's expand your vocabulary! What words interest you?";
-  }
-  else if (lowerMessage.includes('pronunciation')) {
-    return "Pronunciation practice is important! What words would you like to practice?";
-  }
-  else {
-    return "That's interesting! I can help with grammar, vocabulary, or pronunciation. What would you like to focus on?";
-  }
-};
+app.get('/health', (req, res) => {
+  res.send({ status: 'ok' });
+});
 
 app.listen(port, () => {
-  console.log(`🎤 Real-time English Tutor backend running on port ${port}`);
+  console.log("English Tutor backend running on port " + port);
 });

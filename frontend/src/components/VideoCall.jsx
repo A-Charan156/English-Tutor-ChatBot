@@ -15,9 +15,8 @@ export const VideoCall = () => {
           audio: true 
         });
         setStream(userStream);
-        if (videoRef.current) {
-          videoRef.current.srcObject = userStream;
-        }
+        // We cannot set videoRef.current.srcObject here because the video element 
+        // is conditionally rendered and hasn't been added to the DOM yet.
       } catch (error) {
         console.error("Error accessing webcam:", error);
       }
@@ -31,6 +30,12 @@ export const VideoCall = () => {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (stream && videoRef.current) {
+      videoRef.current.srcObject = stream;
+    }
+  }, [stream]);
 
   return (
     <div className="video-call-container">

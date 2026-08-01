@@ -1,14 +1,13 @@
 {
-  "name": "r3f-virtual-girlfriend-backend",
+  "name": "english-tutor-chatbot-backend",
   "version": "1.0.0",
-  "description": "Backend for the virtual girlfriend app",
+  "description": "Backend for the English Tutor ChatBot",
   "main": "index.js",
   "type": "module",
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js --ext js"
   },
-  "author": "Wawa SENSEI <contact@wawasensei.dev>",
   "dependencies": {
     "@google/generative-ai": "^0.2.1",
     "cors": "^2.8.5",
